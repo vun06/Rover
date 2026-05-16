@@ -1,0 +1,156 @@
+import serial
+import time
+import curses
+
+PORT = "/dev/ttyUSB0"   # Change to "/dev/ttyACM0" if needed
+BAUD = 57600
+
+MAX_SPEED = 260
+TURN_SPEED = 140
+CURVE_AMOUNT = 0.45
+ACCEL = 18
+DECEL = 30
+LOOP_TIME = 0.04
+
+ser = serial.Serial(PORT, BAUD, timeout=1)
+time.sleep(1)
+
+
+def signed_16(value):
+    value = int(max(min(value, 500), -500))
+
+    if value < 0:
+        value = 65536 + value
+
+    return [(value >> 8) & 255, value & 255]
+
+
+def drive_direct(left, right):
+    # iRobot Create command 145: Drive Direct
+    # Format: right wheel high, right wheel low, left wheel high, left wheel low
+    right_bytes = signed_16(right)
+    left_bytes = signed_16(left)
+
+    ser.write(bytes([145] + right_bytes + left_bytes))
+
+
+def ramp(current, target):
+    if abs(target) > abs(current):
+        step = ACCEL
+    else:
+        step = DECEL
+
+    if current < target:
+        return min(current + step, target)
+
+    if current > target:
+        return max(current - step, target)
+
+    return current
+
+
+def main(screen):
+    current_left = 0
+    current_right = 0
+
+    curses.curs_set(0)
+    screen.nodelay(True)
+    screen.keypad(True)
+
+    # Start iRobot Open Interface
+    ser.write(bytes([128]))  # Start
+    time.sleep(0.1)
+
+    ser.write(bytes([132]))  # Full mode
+    time.sleep(0.1)
+
+    pressed = set()
+    last_key_time = time.time()
+
+    screen.addstr(0, 0, "iRobot Create Console Driving")
+    screen.addstr(2, 0, "UP = forward")
+    screen.addstr(3, 0, "DOWN = backward")
+    screen.addstr(4, 0, "LEFT = turn left")
+    screen.addstr(5, 0, "RIGHT = turn right")
+    screen.addstr(6, 0, "UP + LEFT/RIGHT = smooth curve")
+    screen.addstr(7, 0, "SPACE = stop")
+    screen.addstr(8, 0, "Q = quit")
+
+    try:
+        while True:
+            key = screen.getch()
+            now = time.time()
+
+            if key != -1:
+                last_key_time = now
+
+                if key == curses.KEY_UP:
+                    pressed.add("up")
+                elif key == curses.KEY_DOWN:
+                    pressed.add("down")
+                elif key == curses.KEY_LEFT:
+                    pressed.add("left")
+                elif key == curses.KEY_RIGHT:
+                    pressed.add("right")
+                elif key == ord(" "):
+                    pressed.clear()
+                elif key == ord("q") or key == ord("Q"):
+                    break
+
+            # Simulated key release
+            if now - last_key_time > 0.18:
+                pressed.clear()
+
+            forward = 0
+
+            if "up" in pressed:
+                forward = MAX_SPEED
+            elif "down" in pressed:
+                forward = -MAX_SPEED
+
+            target_left = 0
+            target_right = 0
+
+            if forward != 0:
+                target_left = forward
+                target_right = forward
+
+                if "left" in pressed:
+                    target_left = forward * (1 - CURVE_AMOUNT)
+                    target_right = forward
+
+                elif "right" in pressed:
+                    target_left = forward
+                    target_right = forward * (1 - CURVE_AMOUNT)
+
+            else:
+                if "left" in pressed:
+                    target_left = -TURN_SPEED
+                    target_right = TURN_SPEED
+
+                elif "right" in pressed:
+                    target_left = TURN_SPEED
+                    target_right = -TURN_SPEED
+
+            target_left = int(max(min(target_left, MAX_SPEED), -MAX_SPEED))
+            target_right = int(max(min(target_right, MAX_SPEED), -MAX_SPEED))
+
+            current_left = ramp(current_left, target_left)
+            current_right = ramp(current_right, target_right)
+
+            drive_direct(current_left, current_right)
+
+            screen.addstr(11, 0, " " * 60)
+            screen.addstr(11, 0, f"Pressed: {pressed}")
+
+            screen.addstr(12, 0, " " * 60)
+            screen.addstr(12, 0, f"Left wheel: {current_left}  Right wheel: {current_right}")
+
+            time.sleep(LOOP_TIME)
+
+    finally:
+        drive_direct(0, 0)
+        ser.close()
+
+
+curses.wrapper(main)
