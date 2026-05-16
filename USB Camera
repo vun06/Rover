@@ -1,0 +1,126 @@
+# Raspberry Pi USB Webcam Test
+
+This project demonstrates a USB webcam successfully connected to a Raspberry Pi.
+
+## Hardware
+- Raspberry Pi 5
+- USB Webcam
+- Raspberry Pi OS
+
+## Goal
+Verify that the Raspberry Pi can:
+1. Detect the webcam
+2. Display live video
+3. Capture images
+4. Record video
+
+---
+
+# 1. Verify Webcam Detection
+
+Open terminal and run:
+
+```bash
+ls /dev/video*
+```
+
+Expected output:
+
+```bash
+/dev/video0
+```
+
+This confirms the Raspberry Pi recognizes the USB webcam.
+
+---
+
+# 2. Install Webcam Tools
+
+```bash
+sudo apt update
+sudo apt install fswebcam ffmpeg v4l-utils
+```
+
+---
+
+# 3. Capture a Test Image
+
+```bash
+fswebcam -d /dev/video0 test.jpg
+```
+
+This saves an image called:
+
+```text
+test.jpg
+```
+
+---
+
+# 4. Record Video
+
+```bash
+ffmpeg -f v4l2 -framerate 30 -video_size 1280x720 -i /dev/video0 webcam_record.mp4
+```
+
+Stop recording with:
+
+```text
+CTRL + C
+```
+
+---
+
+# 5. Live Camera Preview
+
+```bash
+ffplay -f v4l2 -i /dev/video0
+```
+
+This opens a live webcam preview window directly on the Raspberry Pi.
+
+---
+
+# Example Python Webcam Viewer
+
+```python
+import cv2
+
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("Camera not found")
+    exit()
+
+while True:
+    ret, frame = cap.read()
+
+    if not ret:
+        break
+
+    cv2.imshow("USB Webcam", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+```
+
+Run:
+
+```bash
+python3 webcam_view.py
+```
+
+Press `q` to quit.
+
+---
+
+# Result
+
+The USB webcam successfully:
+- Connected to Raspberry Pi
+- Displayed live video
+- Captured images
+- Recorded video
