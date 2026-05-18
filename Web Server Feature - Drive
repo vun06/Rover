@@ -1,0 +1,128 @@
+from flask import Flask, request
+import serial
+import time
+
+PORT = "/dev/ttyUSB0"   # change to "/dev/ttyACM0" if needed
+BAUD = 57600
+
+MAX_SPEED = 220
+TURN_SPEED = 140
+CURVE_AMOUNT = 0.45
+
+app = Flask(__name__)
+
+ser = serial.Serial(PORT, BAUD, timeout=1)
+time.sleep(1)
+
+def signed_16(value):
+    value = int(max(min(value, 500), -500))
+    if value < 0:
+        value = 65536 + value
+    return [(value >> 8) & 255, value & 255]
+
+def drive_direct(left, right):
+    right_bytes = signed_16(right)
+    left_bytes = signed_16(left)
+    ser.write(bytes([145] + right_bytes + left_bytes))
+
+def stop_robot():
+    drive_direct(0, 0)
+
+# Start iRobot
+ser.write(bytes([128]))
+time.sleep(0.1)
+ser.write(bytes([132]))
+time.sleep(0.1)
+
+@app.route("/")
+def home():
+    return """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rover Web Control</title>
+    <style>
+        body {
+            font-family: Arial;
+            text-align: center;
+            background: #111;
+            color: white;
+        }
+        button {
+            width: 130px;
+            height: 70px;
+            font-size: 22px;
+            margin: 8px;
+            border-radius: 12px;
+        }
+        .stop {
+            background: red;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>Rover Web Control</h1>
+
+    <div>
+        <button onclick="send('forward')">Forward</button>
+    </div>
+
+    <div>
+        <button onclick="send('left')">Left</button>
+        <button class="stop" onclick="send('stop')">Stop</button>
+        <button onclick="send('right')">Right</button>
+    </div>
+
+    <div>
+        <button onclick="send('backward')">Backward</button>
+    </div>
+
+    <h3>Smooth Curve</h3>
+    <div>
+        <button onclick="send('forward_left')">Forward Left</button>
+        <button onclick="send('forward_right')">Forward Right</button>
+    </div>
+
+    <script>
+        function send(cmd) {
+            fetch('/cmd?move=' + cmd);
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.route("/cmd")
+def command():
+    move = request.args.get("move")
+
+    if move == "forward":
+        drive_direct(MAX_SPEED, MAX_SPEED)
+
+    elif move == "backward":
+        drive_direct(-MAX_SPEED, -MAX_SPEED)
+
+    elif move == "left":
+        drive_direct(-TURN_SPEED, TURN_SPEED)
+
+    elif move == "right":
+        drive_direct(TURN_SPEED, -TURN_SPEED)
+
+    elif move == "forward_left":
+        drive_direct(int(MAX_SPEED * (1 - CURVE_AMOUNT)), MAX_SPEED)
+
+    elif move == "forward_right":
+        drive_direct(MAX_SPEED, int(MAX_SPEED * (1 - CURVE_AMOUNT)))
+
+    elif move == "stop":
+        stop_robot()
+
+    return "OK"
+
+if __name__ == "__main__":
+    try:
+        app.run(host="0.0.0.0", port=5000)
+    finally:
+        stop_robot()
+        ser.close()
