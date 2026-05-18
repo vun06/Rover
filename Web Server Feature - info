@@ -1,0 +1,234 @@
+from flask import Flask
+import serial
+import time
+import socket
+import platform
+import os
+
+PORT = "/dev/ttyUSB0"   # Change to "/dev/ttyACM0" if needed
+BAUD = 57600
+
+app = Flask(__name__)
+
+robot_connected = False
+ser = None
+
+try:
+    ser = serial.Serial(PORT, BAUD, timeout=1)
+    time.sleep(1)
+
+    ser.write(bytes([128]))  # Start OI
+    time.sleep(0.1)
+    ser.write(bytes([132]))  # Full mode
+    time.sleep(0.1)
+
+    robot_connected = True
+except Exception as e:
+    robot_connected = False
+    serial_error = str(e)
+
+
+def signed_16(value):
+    value = int(max(min(value, 500), -500))
+    if value < 0:
+        value = 65536 + value
+    return [(value >> 8) & 255, value & 255]
+
+
+def read_sensor(packet_id, size=1):
+    if not robot_connected:
+        return None
+
+    try:
+        ser.write(bytes([142, packet_id]))
+        data = ser.read(size)
+
+        if len(data) != size:
+            return None
+
+        if size == 1:
+            return data[0]
+
+        return int.from_bytes(data, byteorder="big", signed=True)
+
+    except:
+        return None
+
+
+def drive_direct(left, right):
+    if not robot_connected:
+        return
+
+    rb = signed_16(right)
+    lb = signed_16(left)
+    ser.write(bytes([145] + rb + lb))
+
+
+def stop_robot():
+    drive_direct(0, 0)
+
+
+def get_ip():
+    try:
+        hostname = socket.gethostname()
+        return socket.gethostbyname(hostname)
+    except:
+        return "Unknown"
+
+
+@app.route("/")
+def home():
+    bumps = read_sensor(7)
+    wall = read_sensor(8)
+    cliff_left = read_sensor(9)
+    cliff_front_left = read_sensor(10)
+    cliff_front_right = read_sensor(11)
+    cliff_right = read_sensor(12)
+    battery_charge = read_sensor(25, 2)
+    battery_capacity = read_sensor(26, 2)
+    voltage = read_sensor(22, 2)
+    current = read_sensor(23, 2)
+    temperature = read_sensor(24)
+
+    battery_percent = "Unknown"
+    if battery_charge is not None and battery_capacity not in (None, 0):
+        battery_percent = round((battery_charge / battery_capacity) * 100, 1)
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rover Information Server</title>
+    <meta http-equiv="refresh" content="2">
+    <style>
+        body {{
+            font-family: Arial;
+            background: #111;
+            color: white;
+            padding: 25px;
+        }}
+        h1 {{
+            color: #00ff99;
+        }}
+        .card {{
+            background: #222;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 12px;
+        }}
+        .good {{
+            color: #00ff99;
+        }}
+        .bad {{
+            color: #ff5555;
+        }}
+        button {{
+            width: 120px;
+            height: 55px;
+            margin: 6px;
+            font-size: 18px;
+            border-radius: 10px;
+        }}
+        .stop {{
+            background: red;
+            color: white;
+        }}
+    </style>
+</head>
+<body>
+
+<h1>Rover Information Server</h1>
+
+<div class="card">
+    <h2>Connection</h2>
+    <p>Robot connected: <b class="{'good' if robot_connected else 'bad'}">{robot_connected}</b></p>
+    <p>Serial port: {PORT}</p>
+    <p>Baud rate: {BAUD}</p>
+</div>
+
+<div class="card">
+    <h2>Raspberry Pi Info</h2>
+    <p>Hostname: {socket.gethostname()}</p>
+    <p>IP Address: {get_ip()}</p>
+    <p>Operating System: {platform.platform()}</p>
+    <p>Python Version: {platform.python_version()}</p>
+</div>
+
+<div class="card">
+    <h2>Robot Sensors</h2>
+    <p>Bump / Wheel Drop Packet: {bumps}</p>
+    <p>Wall Sensor: {wall}</p>
+    <p>Cliff Left: {cliff_left}</p>
+    <p>Cliff Front Left: {cliff_front_left}</p>
+    <p>Cliff Front Right: {cliff_front_right}</p>
+    <p>Cliff Right: {cliff_right}</p>
+</div>
+
+<div class="card">
+    <h2>Battery</h2>
+    <p>Voltage: {voltage} mV</p>
+    <p>Current: {current} mA</p>
+    <p>Temperature: {temperature} C</p>
+    <p>Battery Charge: {battery_charge} mAh</p>
+    <p>Battery Capacity: {battery_capacity} mAh</p>
+    <p>Battery Percent: {battery_percent}%</p>
+</div>
+
+<div class="card">
+    <h2>Rover Description</h2>
+    <p>This rover is an iRobot Create platform connected to a Raspberry Pi through a USB serial cable.</p>
+    <p>The Raspberry Pi sends Open Interface commands to the iRobot to control the wheels and read sensor data.</p>
+    <p>The rover can be controlled from Linux console, VNC, or this web server.</p>
+</div>
+
+<div class="card">
+    <h2>Basic Web Control</h2>
+    <button onclick="fetch('/forward')">Forward</button><br>
+    <button onclick="fetch('/left')">Left</button>
+    <button class="stop" onclick="fetch('/stop')">Stop</button>
+    <button onclick="fetch('/right')">Right</button><br>
+    <button onclick="fetch('/backward')">Backward</button>
+</div>
+
+</body>
+</html>
+"""
+
+
+@app.route("/forward")
+def forward():
+    drive_direct(180, 180)
+    return "Forward"
+
+
+@app.route("/backward")
+def backward():
+    drive_direct(-180, -180)
+    return "Backward"
+
+
+@app.route("/left")
+def left():
+    drive_direct(-120, 120)
+    return "Left"
+
+
+@app.route("/right")
+def right():
+    drive_direct(120, -120)
+    return "Right"
+
+
+@app.route("/stop")
+def stop():
+    stop_robot()
+    return "Stop"
+
+
+if __name__ == "__main__":
+    try:
+        app.run(host="0.0.0.0", port=5000)
+    finally:
+        stop_robot()
+        if ser:
+            ser.close()
