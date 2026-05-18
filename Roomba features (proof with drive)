@@ -1,0 +1,189 @@
+import serial
+import time
+import curses
+import RPi.GPIO as GPIO
+
+PORT = "/dev/ttyUSB0"   # change to "/dev/ttyACM0" if needed
+BAUD = 57600
+
+TRIG = 23
+ECHO = 24
+
+MAX_SPEED = 240
+TURN_SPEED = 140
+CURVE_AMOUNT = 0.45
+
+ACCEL = 16
+DECEL = 35
+LOOP_TIME = 0.04
+
+STOP_DISTANCE_CM = 25
+
+ser = serial.Serial(PORT, BAUD, timeout=1)
+time.sleep(1)
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
+GPIO.output(TRIG, False)
+time.sleep(0.5)
+
+def signed_16(value):
+    value = int(max(min(value, 500), -500))
+    if value < 0:
+        value = 65536 + value
+    return [(value >> 8) & 255, value & 255]
+
+def drive_direct(left, right):
+    rb = signed_16(right)
+    lb = signed_16(left)
+    ser.write(bytes([145] + rb + lb))
+
+def ramp(current, target):
+    step = ACCEL if abs(target) > abs(current) else DECEL
+
+    if current < target:
+        return min(current + step, target)
+    elif current > target:
+        return max(current - step, target)
+    return current
+
+def get_distance_cm():
+    GPIO.output(TRIG, False)
+    time.sleep(0.00002)
+
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
+
+    start_timeout = time.time()
+    while GPIO.input(ECHO) == 0:
+        pulse_start = time.time()
+        if pulse_start - start_timeout > 0.03:
+            return None
+
+    end_timeout = time.time()
+    while GPIO.input(ECHO) == 1:
+        pulse_end = time.time()
+        if pulse_end - end_timeout > 0.03:
+            return None
+
+    pulse_duration = pulse_end - pulse_start
+    distance = pulse_duration * 17150
+    return round(distance, 1)
+
+def main(screen):
+    current_left = 0
+    current_right = 0
+
+    curses.curs_set(0)
+    screen.nodelay(True)
+    screen.keypad(True)
+
+    ser.write(bytes([128]))
+    time.sleep(0.1)
+    ser.write(bytes([132]))
+    time.sleep(0.1)
+
+    pressed = set()
+    last_key_time = time.time()
+    last_distance_time = 0
+    distance = None
+
+    screen.addstr(0, 0, "Keyboard Drive + Ultrasonic Stop")
+    screen.addstr(2, 0, "UP/DOWN = move")
+    screen.addstr(3, 0, "LEFT/RIGHT = turn or curve")
+    screen.addstr(4, 0, "SPACE = stop")
+    screen.addstr(5, 0, "Q = quit")
+
+    try:
+        while True:
+            now = time.time()
+            key = screen.getch()
+
+            if key != -1:
+                last_key_time = now
+
+                if key == curses.KEY_UP:
+                    pressed.add("up")
+                elif key == curses.KEY_DOWN:
+                    pressed.add("down")
+                elif key == curses.KEY_LEFT:
+                    pressed.add("left")
+                elif key == curses.KEY_RIGHT:
+                    pressed.add("right")
+                elif key == ord(" "):
+                    pressed.clear()
+                elif key == ord("q") or key == ord("Q"):
+                    break
+
+            if now - last_key_time > 0.18:
+                pressed.clear()
+
+            if now - last_distance_time > 0.10:
+                distance = get_distance_cm()
+                last_distance_time = now
+
+            forward = 0
+
+            if "up" in pressed:
+                forward = MAX_SPEED
+            elif "down" in pressed:
+                forward = -MAX_SPEED
+
+            target_left = 0
+            target_right = 0
+
+            if forward != 0:
+                target_left = forward
+                target_right = forward
+
+                if "left" in pressed:
+                    target_left = forward * (1 - CURVE_AMOUNT)
+                    target_right = forward
+                elif "right" in pressed:
+                    target_left = forward
+                    target_right = forward * (1 - CURVE_AMOUNT)
+
+            else:
+                if "left" in pressed:
+                    target_left = -TURN_SPEED
+                    target_right = TURN_SPEED
+                elif "right" in pressed:
+                    target_left = TURN_SPEED
+                    target_right = -TURN_SPEED
+
+            # ultrasonic safety stop only blocks forward motion
+            if distance is not None and distance < STOP_DISTANCE_CM:
+                if target_left > 0 or target_right > 0:
+                    target_left = 0
+                    target_right = 0
+
+            target_left = int(max(min(target_left, MAX_SPEED), -MAX_SPEED))
+            target_right = int(max(min(target_right, MAX_SPEED), -MAX_SPEED))
+
+            current_left = ramp(current_left, target_left)
+            current_right = ramp(current_right, target_right)
+
+            drive_direct(current_left, current_right)
+
+            screen.addstr(8, 0, " " * 60)
+            screen.addstr(8, 0, f"Distance: {distance} cm")
+            screen.addstr(9, 0, " " * 60)
+            screen.addstr(9, 0, f"Pressed: {pressed}")
+            screen.addstr(10, 0, " " * 60)
+            screen.addstr(10, 0, f"Current L/R: {current_left:4} {current_right:4}")
+
+            if distance is not None and distance < STOP_DISTANCE_CM:
+                screen.addstr(12, 0, "Obstacle close: forward blocked     ")
+            else:
+                screen.addstr(12, 0, "Clear                              ")
+
+            time.sleep(LOOP_TIME)
+
+    finally:
+        drive_direct(0, 0)
+        ser.close()
+        GPIO.cleanup()
+
+curses.wrapper(main)
