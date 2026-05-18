@@ -9,15 +9,16 @@ BAUD = 57600
 TRIG = 23
 ECHO = 24
 
-MAX_SPEED = 240
-TURN_SPEED = 140
+MAX_SPEED = 220
+TURN_SPEED = 130
 CURVE_AMOUNT = 0.45
 
-ACCEL = 16
-DECEL = 35
+ACCEL = 14
+DECEL = 45
 LOOP_TIME = 0.04
 
-STOP_DISTANCE_CM = 25
+STOP_DISTANCE_CM = 10
+WARNING_DISTANCE_CM = 20
 
 ser = serial.Serial(PORT, BAUD, timeout=1)
 time.sleep(1)
@@ -39,16 +40,18 @@ def drive_direct(left, right):
     lb = signed_16(left)
     ser.write(bytes([145] + rb + lb))
 
+def stop_robot():
+    drive_direct(0, 0)
+
 def ramp(current, target):
     step = ACCEL if abs(target) > abs(current) else DECEL
-
     if current < target:
         return min(current + step, target)
     elif current > target:
         return max(current - step, target)
     return current
 
-def get_distance_cm():
+def single_distance_cm():
     GPIO.output(TRIG, False)
     time.sleep(0.00002)
 
@@ -56,25 +59,45 @@ def get_distance_cm():
     time.sleep(0.00001)
     GPIO.output(TRIG, False)
 
-    start_timeout = time.time()
+    timeout = time.time() + 0.03
     while GPIO.input(ECHO) == 0:
         pulse_start = time.time()
-        if pulse_start - start_timeout > 0.03:
+        if time.time() > timeout:
             return None
 
-    end_timeout = time.time()
+    timeout = time.time() + 0.03
     while GPIO.input(ECHO) == 1:
         pulse_end = time.time()
-        if pulse_end - end_timeout > 0.03:
+        if time.time() > timeout:
             return None
 
-    pulse_duration = pulse_end - pulse_start
-    distance = pulse_duration * 17150
+    duration = pulse_end - pulse_start
+    distance = duration * 17150
+
+    if distance < 2 or distance > 400:
+        return None
+
     return round(distance, 1)
+
+def get_distance_cm():
+    readings = []
+
+    for _ in range(5):
+        d = single_distance_cm()
+        if d is not None:
+            readings.append(d)
+        time.sleep(0.01)
+
+    if len(readings) == 0:
+        return None
+
+    readings.sort()
+    return readings[len(readings) // 2]
 
 def main(screen):
     current_left = 0
     current_right = 0
+    distance = None
 
     curses.curs_set(0)
     screen.nodelay(True)
@@ -88,13 +111,6 @@ def main(screen):
     pressed = set()
     last_key_time = time.time()
     last_distance_time = 0
-    distance = None
-
-    screen.addstr(0, 0, "Keyboard Drive + Ultrasonic Stop")
-    screen.addstr(2, 0, "UP/DOWN = move")
-    screen.addstr(3, 0, "LEFT/RIGHT = turn or curve")
-    screen.addstr(4, 0, "SPACE = stop")
-    screen.addstr(5, 0, "Q = quit")
 
     try:
         while True:
@@ -120,7 +136,7 @@ def main(screen):
             if now - last_key_time > 0.18:
                 pressed.clear()
 
-            if now - last_distance_time > 0.10:
+            if now - last_distance_time > 0.12:
                 distance = get_distance_cm()
                 last_distance_time = now
 
@@ -141,6 +157,7 @@ def main(screen):
                 if "left" in pressed:
                     target_left = forward * (1 - CURVE_AMOUNT)
                     target_right = forward
+
                 elif "right" in pressed:
                     target_left = forward
                     target_right = forward * (1 - CURVE_AMOUNT)
@@ -149,15 +166,24 @@ def main(screen):
                 if "left" in pressed:
                     target_left = -TURN_SPEED
                     target_right = TURN_SPEED
+
                 elif "right" in pressed:
                     target_left = TURN_SPEED
                     target_right = -TURN_SPEED
 
-            # ultrasonic safety stop only blocks forward motion
-            if distance is not None and distance < STOP_DISTANCE_CM:
-                if target_left > 0 or target_right > 0:
-                    target_left = 0
-                    target_right = 0
+            obstacle_stop = False
+            obstacle_warning = False
+
+            if distance is not None:
+                if distance <= STOP_DISTANCE_CM:
+                    obstacle_stop = True
+                elif distance <= WARNING_DISTANCE_CM:
+                    obstacle_warning = True
+
+            # Stop only forward motion when object is close
+            if obstacle_stop and (target_left > 0 or target_right > 0):
+                target_left = 0
+                target_right = 0
 
             target_left = int(max(min(target_left, MAX_SPEED), -MAX_SPEED))
             target_right = int(max(min(target_right, MAX_SPEED), -MAX_SPEED))
@@ -167,22 +193,30 @@ def main(screen):
 
             drive_direct(current_left, current_right)
 
-            screen.addstr(8, 0, " " * 60)
-            screen.addstr(8, 0, f"Distance: {distance} cm")
-            screen.addstr(9, 0, " " * 60)
-            screen.addstr(9, 0, f"Pressed: {pressed}")
-            screen.addstr(10, 0, " " * 60)
+            screen.erase()
+            screen.addstr(0, 0, "iRobot Keyboard Drive + Ultrasonic Sensor")
+            screen.addstr(2, 0, "UP/DOWN = move | LEFT/RIGHT = turn/curve | SPACE = stop | Q = quit")
+            screen.addstr(4, 0, f"Distance: {distance} cm")
+            screen.addstr(5, 0, f"Stop distance: {STOP_DISTANCE_CM} cm")
+            screen.addstr(6, 0, f"Warning distance: {WARNING_DISTANCE_CM} cm")
+            screen.addstr(8, 0, f"Pressed keys: {pressed}")
+            screen.addstr(9, 0, f"Target L/R: {target_left:4} {target_right:4}")
             screen.addstr(10, 0, f"Current L/R: {current_left:4} {current_right:4}")
 
-            if distance is not None and distance < STOP_DISTANCE_CM:
-                screen.addstr(12, 0, "Obstacle close: forward blocked     ")
+            if distance is None:
+                screen.addstr(12, 0, "Sensor status: NO VALID READING")
+            elif obstacle_stop:
+                screen.addstr(12, 0, "Sensor status: STOP - obstacle too close")
+            elif obstacle_warning:
+                screen.addstr(12, 0, "Sensor status: WARNING - obstacle nearby")
             else:
-                screen.addstr(12, 0, "Clear                              ")
+                screen.addstr(12, 0, "Sensor status: CLEAR")
 
+            screen.refresh()
             time.sleep(LOOP_TIME)
 
     finally:
-        drive_direct(0, 0)
+        stop_robot()
         ser.close()
         GPIO.cleanup()
 
