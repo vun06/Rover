@@ -1,0 +1,23 @@
+import socket
+from LCD import LCD
+
+def get_ip_address():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "No IP"
+    finally:
+        s.close()
+    return ip
+
+def display_ip_on_lcd():
+    lcd = LCD(2, 0x27, True)   # change 0x27 to 0x3f if needed
+    ip = get_ip_address()
+
+    lcd.clear()
+    lcd.message("Raspberry Pi IP", 1)
+    lcd.message(ip[:16], 2)
+
+display_ip_on_lcd()
